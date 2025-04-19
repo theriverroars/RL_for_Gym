@@ -2,16 +2,50 @@
 import numpy as np
 import gymnasium as gym
 from sklearn.neural_network import MLPRegressor
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+#from IPython.display import clear_output
+import os
 
 # Environment parameters
 TARGET_POSITION = 0.45
 POWER = 0.0015
 GRAVITY = 0.0025
 
+# Initialize plots
+plt.ion()  # Interactive mode
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+fig.suptitle('Training Performance')
+
+# Data storage for plotting
+position_errors = []
+loss_history = []
+
+def update_plots():
+    # Remove the clear command as it can interfere
+    ax1.clear()
+    ax2.clear()
+    
+    ax1.plot(position_errors, 'b-')
+    ax1.set_title('Position Error (x - target)')
+    ax1.axhline(0, color='r', linestyle='--')  # Add target line
+    ax1.set_ylabel('Error')
+    ax1.grid(True)
+    
+    ax2.plot(loss_history, 'r-')
+    ax2.set_title('Neural Network Training Loss')
+    ax2.set_ylabel('Loss')
+    #ax2.set_xlabel('Training Steps')
+    ax2.grid(True)
+    
+    plt.tight_layout()
+    plt.draw()
+    plt.pause(0.01)  # REQUIRED for live updates
+
 class DynamicsModel:
     """ Neural network to approximate the unknown dynamics. """
     def __init__(self):
-        self.model = MLPRegressor(hidden_layer_sizes=(64, 64), activation='relu', solver='adam', max_iter=500)
+        self.model = MLPRegressor(hidden_layer_sizes=(64, 64), activation='relu', solver='adam', max_iter=500, warm_start=True)
         self.trained = False
         self.X_train = []
         self.y_train = []
@@ -30,9 +64,19 @@ class DynamicsModel:
         self.X_train.append(np.hstack([x, u]))
         self.y_train.append(x_next)
         
-        if len(self.X_train) > 50:  # Train after collectqing more data
+        if len(self.X_train) > 50:  # Train after collecting more data
             self.model.fit(np.array(self.X_train), np.array(self.y_train))
             self.trained = True
+            if hasattr(self.model, "loss_"):
+                loss_history.append(self.model.loss_)
+        
+        #Update position error for plotting
+        position_errors.append(x[0] - TARGET_POSITION)
+        
+        if len(loss_history) % 20 == 0:
+            update_plots()
+        
+        
 
 class iLQRController:
     def __init__(self, dynamics_model, horizon=50, max_iter=10, Q_terminal=np.diag([1000, 0]), R=0.01):
@@ -156,7 +200,8 @@ def main():
         if terminated:
             print("Target reached!", "Total Reward:", total_reward, "Steps:", count)
             break
-
+        
+    plt.savefig("training_performance.png")
     env.close()
 
 if __name__ == "__main__":
