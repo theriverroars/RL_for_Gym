@@ -35,7 +35,7 @@ class iLQRController:
     def compute_trajectory(self, x0, u_seq):
         x_seq = [x0]
         for u in u_seq:
-            x_next = self.dynamics_model.predict(x_seq[-1], u)[0] #self.dynamics(x_seq[-1], u)[0]
+            x_next = self.dynamics_model.predict(x_seq[-1], u) #self.dynamics(x_seq[-1], u)[0]
             x_seq.append(x_next)
         return np.array(x_seq)
 
@@ -72,6 +72,7 @@ class iLQRController:
             new_u[t] = u_seq[t] + k[t] + K[t] @ (x - new_x[t])
             new_u[t] = np.clip(new_u[t], -1, 1)
             x = self.dynamics_model.predict(x, new_u[t])#x, _, _ = self.dynamics(x, new_u[t])
+            print("Shape of x:", x.shape)
             new_x.append(x)
             
             total_cost += 0.5 * new_u[t].T @ self.R @ new_u[t]
@@ -133,15 +134,20 @@ class DynamicsModel(nn.Module):
     def predict(self, x, u):
         x_flat = np.asarray(x).flatten()
         u_flat = np.asarray(u).flatten()
-        print("x_flat shape:", x_flat.shape, "u_flat shape:", u_flat.shape) 
+        #print("x_flat shape:", x_flat.shape, "u_flat shape:", u_flat.shape) 
         
         inp = torch.tensor(np.hstack([x_flat, u_flat]), dtype=torch.float32).unsqueeze(0)
-        print("Input shape for NN:", inp.shape)  # Debugging line
+     
         
         with torch.no_grad():
-            return self.net(inp).squeeze(0).numpy()
+            a  = self.net(inp).squeeze(0).numpy()
+            print("Input shape for NN:", inp.shape)  # Debugging line
+            return a
         
     def update(self, x, u, x_next_true):
+        x = np.asarray(x).flatten()
+        u = np.asarray(u).flatten()
+        x_next_true = np.asarray(x_next_true).flatten()
         # Store new data point
         self.X_train.append(np.hstack([x, u]))
         self.y_train.append(x_next_true)
@@ -204,7 +210,9 @@ def main():
 
     # Phase 2: iLQR with Learned Dynamics
     for _ in range(10000):  
-        u_opt = controller.optimize(np.array(obs), u_guess)
+        x0 = np.array(obs, dtype=np.float32).flatten()
+        print("Initial x0 shape:", x0.shape)
+        u_opt = controller.optimize(x0, u_guess)    
         action = np.clip(u_opt[0], -1, 1)
         next_obs, reward, terminated, _, _ = env.step([action])
         total_reward += reward
