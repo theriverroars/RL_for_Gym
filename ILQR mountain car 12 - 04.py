@@ -1,16 +1,52 @@
-#Uses neural netwrork for dynamics. Jacobians are calculated manually.
 import numpy as np
 import gymnasium as gym
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+#from IPython.display import clear_output
+import os
 
 # Environment parameters
 TARGET_POSITION = 0.45
 POWER = 0.0015
 GRAVITY = 0.0025
 
+# Environment setup - NO RENDERING
+env = gym.make('MountainCarContinuous-v0')
+
+
+# Initialize plots
+plt.ion()  # Interactive mode
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+fig.suptitle('Training Performance')
+
+# Data storage for plotting
+position_errors = []
+loss_history = []
+
+def update_plots():
+    # Remove the clear command as it can interfere
+    ax1.clear()
+    ax2.clear()
+    
+    ax1.plot(position_errors, 'b-')
+    ax1.set_title('Position Error (x - target)')
+    ax1.axhline(0, color='r', linestyle='--')  # Add target line
+    ax1.set_ylabel('Error')
+    ax1.grid(True)
+    
+    ax2.plot(loss_history, 'r-')
+    ax2.set_title('Neural Network Training Loss')
+    ax2.set_ylabel('Loss')
+    ax2.set_xlabel('Training Steps')
+    ax2.grid(True)
+    
+    plt.tight_layout()
+    plt.draw()
+    plt.pause(0.01)  # REQUIRED for live updates
+    
 class iLQRController:
     def __init__(self, dynamics_model, horizon=50, max_iter=10, Q_terminal=np.diag([1000, 0]), R=0.01):
         self.horizon = horizon
@@ -23,19 +59,12 @@ class iLQRController:
         """ Uses the learned dynamics model instead of known equations. """
         x_next = self.dynamics_model.predict(x, u)
         A, B = self.dynamics_model.get_jacobians(x, u)
-        print("Shape of A:", A.shape, "Shape of B:", B.shape)
-        # Approximate linearization
-        #AL = np.array([[1, 1], 
-        #             [3 * GRAVITY * np.sin(3 * x[0]), 1]])
-        
-        #B = np.array([[0], [POWER]])
-        
         return x_next, A, B
 
     def compute_trajectory(self, x0, u_seq):
         x_seq = [x0]
         for u in u_seq:
-            x_next = self.dynamics_model.predict(x_seq[-1], u) #self.dynamics(x_seq[-1], u)[0]
+            x_next = self.dynamics_model.predict(x_seq[-1], u)
             x_seq.append(x_next)
         return np.array(x_seq)
 
@@ -71,8 +100,7 @@ class iLQRController:
         for t in range(self.horizon):
             new_u[t] = u_seq[t] + k[t] + K[t] @ (x - new_x[t])
             new_u[t] = np.clip(new_u[t], -1, 1)
-            x = self.dynamics_model.predict(x, new_u[t])#x, _, _ = self.dynamics(x, new_u[t])
-            print("Shape of x:", x.shape)
+            x = self.dynamics_model.predict(x, new_u[t])
             new_x.append(x)
             
             total_cost += 0.5 * new_u[t].T @ self.R @ new_u[t]
@@ -87,7 +115,7 @@ class iLQRController:
         for _ in range(self.max_iter):
             A_list, B_list = [], []
             for t in range(self.horizon):
-                A, B = self.dynamics_model.get_jacobians(x_seq[t], u_seq[t])#_, A, B = self.dynamics(x_seq[t], u_seq[t])
+                _, A, B = self.dynamics(x_seq[t], u_seq[t])
                 A_list.append(A)
                 B_list.append(B)
 
@@ -96,88 +124,56 @@ class iLQRController:
             x_seq, u_seq = new_x[:-1], new_u
 
         return u_seq
-    
-    
+
 class DynamicsModel(nn.Module):
-    """ Neural network to approximate the unknown dynamics. """
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(3, 64),
+            nn.Linear(3, 128),
             nn.ReLU(),
-            nn.Linear(64, 64),
+            nn.Linear(128, 128),
             nn.ReLU(),
-            nn.Linear(64, 2)
-        )  # Fixed missing closing parenthesis
-        
-        self.trained = False
-        self.X_train = []
-        self.y_train = []
-        self.losses = []
-        self.nn_errors = []
-        self.actual_errors = []
-        self.nn_vs_actual_diff = []
+            nn.Linear(128, 2)
+        )
         self.optimizer = optim.Adam(self.parameters(), lr=0.001)
         self.loss_fn = nn.MSELoss()
         
     def forward(self, x):
         return self.net(x)
     
-    def actual_dynamics(self, x, u):
-        pos, vel = x
-        # Handle both scalar and array inputs for u
-        u_val = u[0] if isinstance(u, (np.ndarray, list)) else u
-        new_vel = vel + u_val * POWER - GRAVITY * np.cos(3 * pos)
-        new_pos = pos + new_vel
-        return np.array([new_pos, new_vel])
-    
     def predict(self, x, u):
         x_flat = np.asarray(x).flatten()
         u_flat = np.asarray(u).flatten()
-        #print("x_flat shape:", x_flat.shape, "u_flat shape:", u_flat.shape) 
-        
         inp = torch.tensor(np.hstack([x_flat, u_flat]), dtype=torch.float32).unsqueeze(0)
-     
-        
         with torch.no_grad():
-            a  = self.net(inp).squeeze(0).numpy()
-            print("Input shape for NN:", inp.shape)  # Debugging line
-            return a
-        
+            return self.net(inp).squeeze(0).numpy()
+    
     def update(self, x, u, x_next_true):
         x = np.asarray(x).flatten()
         u = np.asarray(u).flatten()
         x_next_true = np.asarray(x_next_true).flatten()
-        # Store new data point
-        self.X_train.append(np.hstack([x, u]))
-        self.y_train.append(x_next_true)
         
-        # Calculate errors
-        x_next_actual = self.actual_dynamics(x, u)
-        x_next_nn = self.predict(x, u)
+        # Convert to tensors
+        xu = torch.tensor(np.hstack([x, u]), dtype=torch.float32)
+        y_true = torch.tensor(x_next_true, dtype=torch.float32)
         
-        self.actual_errors.append(np.linalg.norm(x_next_actual - x_next_true))
-        self.nn_errors.append(np.linalg.norm(x_next_nn - x_next_true))
-        self.nn_vs_actual_diff.append(np.linalg.norm(x_next_nn - x_next_actual))
+        # Training step
+        self.optimizer.zero_grad()
+        y_pred = self.net(xu.unsqueeze(0)).squeeze(0)
+        loss = self.loss_fn(y_pred, y_true)
+        loss.backward()
+        self.optimizer.step()
         
-        # Retrain model periodically
-        if len(self.X_train) % 50 == 0 and len(self.X_train) > 0:
-            X = torch.tensor(np.array(self.X_train), dtype=torch.float32)
-            y = torch.tensor(np.array(self.y_train), dtype=torch.float32)
-            
-            self.train()
-            for _ in range(10):
-                self.optimizer.zero_grad()
-                outputs = self(X)
-                loss = self.loss_fn(outputs, y)
-                loss.backward()
-                self.optimizer.step()
-                self.losses.append(loss.item())
-                
-            self.trained = True
+        # Store for plotting
+        loss_history.append(loss.item())
+        position_errors.append(x_next_true[0] - TARGET_POSITION)
+        
+        # Update plots every 20 steps
+        if len(loss_history) % 20 == 0:
+            update_plots()
     
     def get_jacobians(self, x, u):
-        xu = torch.tensor(np.hstack([x, u]), dtype=torch.float32).requires_grad_(True)
+        xu = torch.tensor(np.hstack([x, u]), dtype=torch.float32, requires_grad=True)
         output = self.net(xu.unsqueeze(0)).squeeze(0)
         
         jacobian = torch.zeros(2, 3)
@@ -189,72 +185,69 @@ class DynamicsModel(nn.Module):
         B = jacobian[:, 2:].detach().numpy()
         return A, B
 
-# ... [Keep the iLQRController class identical to previous version but with this fix] ...
+# Rest of your iLQRController class remains the same...
 
 def main():
-    env = gym.make('MountainCarContinuous-v0', render_mode='human')
     dynamics_model = DynamicsModel()
-    controller = iLQRController(dynamics_model, horizon=40, max_iter=5)
+    controller = iLQRController(dynamics_model)
     
     obs, _ = env.reset()
-    total_reward = 0
-    u_guess = np.zeros((controller.horizon, 1))
     
-    # Phase 1: Random Exploration
-    exploration_steps = 50
+    #total_reward = 0
+    
+    #u_guess = np.random.uniform(-1, 1, (controller.horizon, 1))  # Better initialization
+    
+        # Improved Exploration Phase
+    exploration_steps = 200  # More exploration steps
     for _ in range(exploration_steps):
-        action = np.random.uniform(-1, 1, size=(1,))
+        # Biased exploration - more positive actions when in valley
+        if obs[0] < -0.5:
+            action = np.random.uniform(0.8, 1, size=(1,))
+        else:
+            action = np.random.uniform(-1, 1, size=(1,))
+            
         next_obs, _, _, _, _ = env.step(action)
         dynamics_model.update(obs, action, next_obs)
         obs = next_obs
 
-    # Phase 2: iLQR with Learned Dynamics
-    for _ in range(10000):  
-        x0 = np.array(obs, dtype=np.float32).flatten()
-        print("Initial x0 shape:", x0.shape)
-        u_opt = controller.optimize(x0, u_guess)    
-        action = np.clip(u_opt[0], -1, 1)
-        next_obs, reward, terminated, _, _ = env.step([action])
-        total_reward += reward
+    
+    """for episode in range(100):
+        obs, _ = env.reset()
+        for step in range(200):
+            x0 = np.array(obs, dtype=np.float32).flatten()
+            u_opt = controller.optimize(x0, np.random.uniform(-1, 1, (controller.horizon, 1)))
+            action = np.clip(u_opt[0], -1, 1)
+            next_obs, reward, terminated, _, _ = env.step(action)
+            
+            dynamics_model.update(obs, action, next_obs)
+            obs = next_obs
+            
+            if terminated:
+                print(f"Episode {episode} succeeded in {step} steps!")
+                break"""
+    for episode in range(100):
+        obs, _ = env.reset()
+        total_reward = 0
+        u_guess = np.random.uniform(-1, 1, (controller.horizon, 1))
         
-        dynamics_model.update(np.array(obs), action, next_obs)
-        obs = next_obs
-        u_guess[:-1] = np.clip(u_opt[1:], -1, 1)
-        u_guess[-1] = action
-        
-        if terminated:
-            print(f"Target reached! Total Reward: {total_reward}")
-            break
-
+        for _ in range(300):  # Episode length
+            x0 = np.array(obs, dtype=np.float32).flatten()
+            u_opt = controller.optimize(x0, u_guess)    
+            action = np.clip(u_opt[0], -1, 1)
+            next_obs, reward, terminated, _, _ = env.step(action)
+            total_reward += reward
+            
+            dynamics_model.update(np.array(obs), action, next_obs)
+            obs = next_obs
+            u_guess[:-1] = np.clip(u_opt[1:], -1, 1)
+            u_guess[-1] = action
+            
+            if terminated:
+                print(f"Episode {episode}: Target reached! Total Reward: {total_reward}")
+                break
+    
     env.close()
-    
-    # Plotting
-    plt.figure(figsize=(12, 8))
-    
-    # Training Loss
-    plt.subplot(3, 1, 1)
-    plt.plot(dynamics_model.losses)
-    plt.title('Training Loss')
-    plt.xlabel('Training Epochs')
-    plt.ylabel('MSE Loss')
-    
-    # Prediction Errors
-    plt.subplot(3, 1, 2)
-    plt.plot(dynamics_model.actual_errors, label='Actual Dynamics Error')
-    plt.plot(dynamics_model.nn_errors, label='NN Prediction Error')
-    plt.title('Prediction Errors Comparison')
-    plt.xlabel('Time Step')
-    plt.ylabel('L2 Norm Error')
-    plt.legend()
-    
-    # Model Comparison
-    plt.subplot(3, 1, 3)
-    plt.plot(dynamics_model.nn_vs_actual_diff)
-    plt.title('NN vs Actual Dynamics Difference')
-    plt.xlabel('Time Step')
-    plt.ylabel('Norm Difference')
-    
-    plt.tight_layout()
+    plt.ioff()
     plt.show()
 
 if __name__ == "__main__":

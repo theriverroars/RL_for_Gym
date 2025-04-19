@@ -1,3 +1,4 @@
+#ILQR for Mountain Car with Neural Network Dynamics Model. A, B calcuulated with known dynamics.
 import numpy as np
 import gymnasium as gym
 from sklearn.neural_network import MLPRegressor
